@@ -1,0 +1,36 @@
+material 
+{
+    name : "my3d",
+    shadingModel : lit,
+    parameters : [
+        { type : sampler2d, name : diffuse },
+        { type : sampler2d, name : normal },
+        { type : sampler2d, name : aorm },
+        { type : float,     name : roughness },
+        { type : float,     name : metallic },
+        { type : float4,    name : albedo }
+    ],
+    requires : [
+        "uv0",
+        "tangents"
+    ],
+}
+
+fragment 
+{
+    void material(inout MaterialInputs material) 
+    {
+        prepareMaterial(material);
+
+        vec4 colorMap = texture(materialParams_diffuse, getUV0());
+        material.baseColor = colorMap * materialParams.albedo;
+
+        vec3 normalMap = texture(materialParams_normal, getUV0()).xyz * 2.0 - 1.0;
+        material.normal = normalize(getWorldTangentFrame() * normalMap);
+
+        vec4 aormMap = texture(materialParams_aorm, getUV0());
+        material.ambientOcclusion = aormMap.r;
+        material.roughness = aormMap.g * materialParams.roughness;
+        material.metallic  = aormMap.b * materialParams.metallic;
+    }
+}
