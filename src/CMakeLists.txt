@@ -14,6 +14,9 @@ target_link_libraries(interface_my3d INTERFACE
     ${FILAMENT_DIR}/libshaders.a
     ${FILAMENT_DIR}/libbackend.a
     ${FILAMENT_DIR}/libsmol-v.a
+    ${FILAMENT_DIR}/libimage.a
+    ${FILAMENT_DIR}/libktxreader.a
+    ${FILAMENT_DIR}/libbasis_transcoder.a
     ${FILAMENT_DIR}/libutils.a
     ${FILAMENT_DIR}/libzstd.a
     ${FILAMENT_DIR}/libbluegl.a

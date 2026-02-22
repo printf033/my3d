@@ -3,6 +3,8 @@
 #include "logger.hpp"
 #include "engine.hpp"
 #include "camera.hpp"
+#include <chrono>
+#include <bitset>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_syswm.h>
 #undef Success
@@ -14,9 +16,21 @@ class Window_SDL
     bool isRunning_ = false;
     SDL_Window *window_ = nullptr;
     filament::SwapChain *swapChain_ = nullptr;
-    int32_t lastX = 0;
-    int32_t lastY = 0;
+    int32_t lastX_ = 0;
+    int32_t lastY_ = 0;
     Camera cameraCPU_;
+    std::chrono::time_point<std::chrono::steady_clock> lastTimepoint_;
+    enum class STATUS
+    {
+        FRONT,
+        BACK,
+        LEFT,
+        RIGHT,
+        UP,
+        DOWN,
+        count
+    };
+    std::bitset<static_cast<size_t>(STATUS::count)> statusMapping_;
 
 public:
     Window_SDL() noexcept = default;
@@ -68,18 +82,53 @@ public:
         {
             check4test(event, engine);
         }
+        auto now = std::chrono::steady_clock::now();
+        updateStatus(engine, std::chrono::duration<double>(now - lastTimepoint_).count());
+        lastTimepoint_ = now;
 
         auto renderer = engine.getRenderer();
         if (renderer->beginFrame(swapChain_))
         {
-            renderer->setClearOptions({.clearColor = {0.2f, 0.4f, 0.6f, 1.0f}, .clear = true}); //////////////////////
-
+            // renderer->setClearOptions({.clearColor = {0.2f, 0.4f, 0.6f, 1.0f}, .clear = true});
             renderer->render(engine.getView("myView"));
             renderer->endFrame();
         }
     }
 
 private:
+    inline void updateStatus(Engine &engine, double deltaSeconds) noexcept
+    {
+        if (statusMapping_.test((size_t)STATUS::FRONT))
+        {
+            cameraCPU_.position += cameraCPU_.front * deltaSeconds * cameraCPU_.moveFactor;
+            engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
+        }
+        if (statusMapping_.test((size_t)STATUS::BACK))
+        {
+            cameraCPU_.position -= cameraCPU_.front * deltaSeconds * cameraCPU_.moveFactor;
+            engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
+        }
+        if (statusMapping_.test((size_t)STATUS::LEFT))
+        {
+            cameraCPU_.position += normalize(cross(filament::math::double3{0, 1, 0}, cameraCPU_.front)) * deltaSeconds * cameraCPU_.moveFactor;
+            engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
+        }
+        if (statusMapping_.test((size_t)STATUS::RIGHT))
+        {
+            cameraCPU_.position += normalize(cross(cameraCPU_.front, filament::math::double3{0, 1, 0})) * deltaSeconds * cameraCPU_.moveFactor;
+            engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
+        }
+        if (statusMapping_.test((size_t)STATUS::UP))
+        {
+            cameraCPU_.position += normalize(cross(cameraCPU_.front, cross(filament::math::double3{0, 1, 0}, cameraCPU_.front))) * deltaSeconds * cameraCPU_.moveFactor;
+            engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
+        }
+        if (statusMapping_.test((size_t)STATUS::DOWN))
+        {
+            cameraCPU_.position += normalize(cross(cameraCPU_.front, cross(cameraCPU_.front, filament::math::double3{0, 1, 0}))) * deltaSeconds * cameraCPU_.moveFactor;
+            engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
+        }
+    }
     inline void check4test(SDL_Event &event, Engine &engine) noexcept
     {
         switch (event.type)
@@ -104,10 +153,10 @@ private:
         {
             auto x = event.motion.x;
             auto y = event.motion.y;
-            cameraCPU_.yawRad += (x - lastX) * cameraCPU_.yawFactor;
+            cameraCPU_.yawRad += (x - lastX_) * cameraCPU_.yawFactor;
             constexpr double DOUBLE_PI = 2.0 * std::numbers::pi;
             cameraCPU_.yawRad = std::remainder(cameraCPU_.yawRad, DOUBLE_PI);
-            cameraCPU_.pitchRad += (lastY - y) * cameraCPU_.pitchFactor;
+            cameraCPU_.pitchRad += (lastY_ - y) * cameraCPU_.pitchFactor;
             constexpr double HALF_PI = 0.5 * std::numbers::pi;
             cameraCPU_.pitchRad = std::clamp(cameraCPU_.pitchRad, -HALF_PI, HALF_PI);
             cameraCPU_.front.x = std::cos(cameraCPU_.pitchRad) * std::cos(cameraCPU_.yawRad);
@@ -115,9 +164,9 @@ private:
             cameraCPU_.front.z = std::cos(cameraCPU_.pitchRad) * std::sin(cameraCPU_.yawRad);
             cameraCPU_.front = normalize(cameraCPU_.front);
             engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
-            lastX = x;
-            lastY = y;
-            LOG_INFO("cursor: {}, {}", x, y);
+            lastX_ = x;
+            lastY_ = y;
+            // LOG_INFO("cursor: {}, {}", x, y);
         }
         break;
         case SDL_MOUSEBUTTONDOWN:
@@ -140,6 +189,45 @@ private:
         break;
         case SDL_KEYDOWN:
         {
+            switch (event.key.keysym.scancode)
+            {
+            case SDL_SCANCODE_ESCAPE:
+            {
+            }
+            break;
+            case SDL_SCANCODE_W:
+            {
+                statusMapping_.set((size_t)STATUS::FRONT);
+            }
+            break;
+            case SDL_SCANCODE_A:
+            {
+                statusMapping_.set((size_t)STATUS::LEFT);
+            }
+            break;
+            case SDL_SCANCODE_S:
+            {
+                statusMapping_.set((size_t)STATUS::BACK);
+            }
+            break;
+            case SDL_SCANCODE_D:
+            {
+                statusMapping_.set((size_t)STATUS::RIGHT);
+            }
+            break;
+            case SDL_SCANCODE_SPACE:
+            {
+                statusMapping_.set((size_t)STATUS::UP);
+            }
+            break;
+            case SDL_SCANCODE_LCTRL:
+            {
+                statusMapping_.set((size_t)STATUS::DOWN);
+            }
+            break;
+            default:
+                break;
+            }
             LOG_INFO("key: {}, state={}", SDL_GetScancodeName(event.key.keysym.scancode), static_cast<int>(event.key.state));
         }
         break;
@@ -154,38 +242,32 @@ private:
             break;
             case SDL_SCANCODE_W:
             {
-                cameraCPU_.position += cameraCPU_.front * cameraCPU_.moveFactor;
-                engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
+                statusMapping_.reset((size_t)STATUS::FRONT);
             }
             break;
             case SDL_SCANCODE_A:
             {
-                cameraCPU_.position += normalize(cross(filament::math::double3{0, 1, 0}, cameraCPU_.front)) * cameraCPU_.moveFactor;
-                engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
+                statusMapping_.reset((size_t)STATUS::LEFT);
             }
             break;
             case SDL_SCANCODE_S:
             {
-                cameraCPU_.position -= cameraCPU_.front * cameraCPU_.moveFactor;
-                engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
+                statusMapping_.reset((size_t)STATUS::BACK);
             }
             break;
             case SDL_SCANCODE_D:
             {
-                cameraCPU_.position += normalize(cross(cameraCPU_.front, filament::math::double3{0, 1, 0})) * cameraCPU_.moveFactor;
-                engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
+                statusMapping_.reset((size_t)STATUS::RIGHT);
             }
             break;
             case SDL_SCANCODE_SPACE:
             {
-                cameraCPU_.position += normalize(cross(cameraCPU_.front, cross(filament::math::double3{0, 1, 0}, cameraCPU_.front))) * cameraCPU_.moveFactor;
-                engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
+                statusMapping_.reset((size_t)STATUS::UP);
             }
             break;
             case SDL_SCANCODE_LCTRL:
             {
-                cameraCPU_.position += normalize(cross(cameraCPU_.front, cross(cameraCPU_.front, filament::math::double3{0, 1, 0}))) * cameraCPU_.moveFactor;
-                engine.getCamera("myCamera")->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
+                statusMapping_.reset((size_t)STATUS::DOWN);
             }
             break;
             default:

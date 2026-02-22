@@ -29,6 +29,11 @@
 #include <filament/VertexBuffer.h>
 #include <filament/IndexBuffer.h>
 #include <filament/Texture.h>
+#include <filament/IndirectLight.h>
+#include <filament/Skybox.h>
+#include <ktxreader/Ktx1Reader.h>
+#include <ktxreader/Ktx2Reader.h>
+#include <gltfio/ResourceLoader.h>
 #include <math/mat3.h>
 #include <math/vec3.h>
 #include <math/quat.h>
@@ -41,10 +46,11 @@ class Engine
     filament::IndexBuffer *indicesGPU_ = nullptr;
     std::unordered_map<std::string, filament::Texture *> texturesGPU_;
     std::unordered_map<std::string, filament::Material *> shadersGPU_;
-    // std::unordered_map<std::string, filament:: *> lightsGPU_;
     std::unordered_map<std::string, filament::View *> viewsGPU_;
     std::unordered_map<std::string, filament::Camera *> camerasGPU_;
     std::unordered_map<std::string, utils::Entity> entitiesGPU_;
+    std::unordered_map<std::string, filament::Skybox *> skyboxesGPU_;
+    std::unordered_map<std::string, filament::IndirectLight *> imageBasedLightsGPU_;
     std::unordered_map<std::string, filament::Scene *> scenesGPU_;
 
     std::vector<Vertex> verticesCPU_;
@@ -52,7 +58,7 @@ class Engine
     std::unordered_map<std::string, Node> modelsCPU_;
 
 public:
-    Engine() noexcept { engineGPU_ = filament::Engine::create(); }
+    Engine() noexcept { engineGPU_ = filament::Engine::create(filament::Engine::Backend::DEFAULT); }
     ~Engine() noexcept = default;
     Engine(const Engine &) = delete;
     Engine &operator=(const Engine &) = delete;
@@ -60,7 +66,7 @@ public:
     Engine &operator=(Engine &&) noexcept = delete;
     void loadModel(const std::string &file, const std::string &filamat)
     {
-        if (modelsCPU_.find(file) != modelsCPU_.end())
+        if (modelsCPU_.contains(file))
             return;
         Assimp::Importer importer;
         auto scene = importer.ReadFile(file,
@@ -70,15 +76,15 @@ public:
                                            aiProcess_GenBoundingBoxes |
                                            aiProcess_JoinIdenticalVertices |
                                            aiProcess_ImproveCacheLocality |
-                                           aiProcess_FindInvalidData |
-                                           aiProcess_FlipUVs);
+                                           aiProcess_FindInvalidData);
         if (scene && scene->mRootNode)
         {
-            Node tmp = importNode(scene->mRootNode, scene->mMeshes, scene->mMaterials, filamat);
+            Node tmp = importNode(scene->mRootNode, scene->mMeshes, scene->mMaterials, scene->mTextures, file, filamat);
             modelsCPU_.emplace(file, std::move(tmp));
             if (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE)
                 LOG_ERROR(importer.GetErrorString());
         }
+        LOG_INFO("loaded model {}", file);
     }
     inline void asyncVerticesIndices2GPU() noexcept
     {
@@ -112,69 +118,170 @@ public:
             return rendererGPU_;
         return rendererGPU_ = engineGPU_->createRenderer();
     }
-    inline filament::View *getView(const std::string &name)
+    inline filament::View *getView(const std::string &key)
     {
-        if (viewsGPU_.find(name) != viewsGPU_.end())
-            return viewsGPU_[name];
-        viewsGPU_.emplace(name, engineGPU_->createView());
-        return viewsGPU_[name];
+        if (viewsGPU_.contains(key))
+            return viewsGPU_[key];
+        viewsGPU_.emplace(key, engineGPU_->createView());
+        return viewsGPU_[key];
     }
-    inline filament::Camera *getCamera(const std::string &name)
+    inline filament::Camera *getCamera(const std::string &key)
     {
-        if (camerasGPU_.find(name) != camerasGPU_.end())
-            return camerasGPU_[name];
-        camerasGPU_.emplace(name, engineGPU_->createCamera(getEntity(name)));
-        return camerasGPU_[name];
+        if (camerasGPU_.contains(key))
+            return camerasGPU_[key];
+        camerasGPU_.emplace(key, engineGPU_->createCamera(getEntity(key)));
+        return camerasGPU_[key];
     }
-    inline filament::Scene *getScene(const std::string &name)
+    inline filament::Scene *getScene(const std::string &key)
     {
-        if (scenesGPU_.find(name) != scenesGPU_.end())
-            return scenesGPU_[name];
-        scenesGPU_.emplace(name, engineGPU_->createScene());
-        return scenesGPU_[name];
+        if (scenesGPU_.contains(key))
+            return scenesGPU_[key];
+        scenesGPU_.emplace(key, engineGPU_->createScene());
+        return scenesGPU_[key];
     }
-    inline utils::Entity getEntity(const std::string &name)
+    inline utils::Entity getEntity(const std::string &key)
     {
-        if (entitiesGPU_.find(name) != entitiesGPU_.end())
-            return entitiesGPU_[name];
-        entitiesGPU_.emplace(name, utils::EntityManager::get().create());
-        return entitiesGPU_[name];
+        if (entitiesGPU_.contains(key))
+            return entitiesGPU_[key];
+        entitiesGPU_.emplace(key, utils::EntityManager::get().create());
+        return entitiesGPU_[key];
     }
-    inline void addModel2Scene(const std::string &sceneName, const std::string &modelName, const std::string &loadedFile) noexcept
+    void addIBL2Scene(const std::string &sceneKey, const std::string &ktx, float intensity = 30000.0f)
     {
-        auto scene = getScene(sceneName);
-        auto &model = modelsCPU_[loadedFile];
-        auto dst = getEntity(modelName);
+        auto scene = getScene(sceneKey);
+        if (!texturesGPU_.contains(ktx))
+        {
+            filament::Texture *texture = nullptr;
+            if (ktx.back() != '2')
+            {
+                std::vector<uint8_t> buffer;
+                readFile(ktx, buffer);
+                auto bytes = buffer.data();
+                auto nbytes = buffer.size();
+                struct KtxPack
+                {
+                    std::vector<uint8_t> buffer;
+                    ktxreader::Ktx1Bundle bundle;
+                } *pack = new KtxPack(std::move(buffer), ktxreader::Ktx1Bundle(bytes, nbytes));
+                texture = ktxreader::Ktx1Reader::createTexture(engineGPU_, pack->bundle, false, [](void *user) -> void
+                                                               { delete reinterpret_cast<KtxPack *>(user); }, pack);
+            }
+            else
+            {
+                std::vector<uint8_t> buffer;
+                readFile(ktx, buffer);
+                ktxreader::Ktx2Reader reader(*engineGPU_);
+                reader.requestFormat(filament::Texture::InternalFormat::RGB16F);
+                reader.requestFormat(filament::Texture::InternalFormat::RGB8);
+                texture = reader.load(buffer.data(), buffer.size(), ktxreader::Ktx2Reader::TransferFunction::LINEAR);
+            }
+            if (!texture)
+            {
+                LOG_ERROR("loaded {}", ktx);
+                return;
+            }
+            LOG_DEBUG("loaded ibl {}: {}x{}, {} levels", ktx, texture->getWidth(0), texture->getHeight(0), texture->getLevels());
+            texturesGPU_.emplace(ktx, texture);
+        }
+        auto texture = texturesGPU_[ktx];
+        if (!imageBasedLightsGPU_.contains(ktx))
+        {
+            filament::math::float3 sh[9] = {};
+            readSphericalHarmonics(ktx.substr(0, ktx.find_last_of("/")) + "/sh.txt", sh);
+            auto ibl = filament::IndirectLight::Builder()
+                           .reflections(texture)
+                           .irradiance(3, sh)
+                           .intensity(intensity)
+                           .build(*engineGPU_);
+            imageBasedLightsGPU_.emplace(ktx, ibl);
+        }
+        scene->setIndirectLight(imageBasedLightsGPU_[ktx]);
+        LOG_INFO("added ibl {} to scene {}", ktx, sceneKey);
+    }
+    void addSkybox2Scene(const std::string &sceneKey, const std::string &ktx)
+    {
+        auto scene = getScene(sceneKey);
+        if (!texturesGPU_.contains(ktx))
+        {
+            filament::Texture *texture = nullptr;
+            if (ktx.back() != '2')
+            {
+                std::vector<uint8_t> buffer;
+                readFile(ktx, buffer);
+                auto bytes = buffer.data();
+                auto nbytes = buffer.size();
+                struct KtxPack
+                {
+                    std::vector<uint8_t> buffer;
+                    ktxreader::Ktx1Bundle bundle;
+                } *pack = new KtxPack(std::move(buffer), ktxreader::Ktx1Bundle(bytes, nbytes));
+                texture = ktxreader::Ktx1Reader::createTexture(engineGPU_, pack->bundle, true, [](void *user) -> void
+                                                               { delete reinterpret_cast<KtxPack *>(user); }, pack);
+            }
+            else
+            {
+                std::vector<uint8_t> buffer;
+                readFile(ktx, buffer);
+                ktxreader::Ktx2Reader reader(*engineGPU_);
+                reader.requestFormat(filament::Texture::InternalFormat::RGB16F);
+                reader.requestFormat(filament::Texture::InternalFormat::RGB8);
+                texture = reader.load(buffer.data(), buffer.size(), ktxreader::Ktx2Reader::TransferFunction::sRGB);
+            }
+            if (!texture)
+            {
+                LOG_ERROR("loaded {}", ktx);
+                return;
+            }
+            LOG_DEBUG("loaded skybox {}: {}x{}, {} levels", ktx, texture->getWidth(0), texture->getHeight(0), texture->getLevels());
+            texturesGPU_.emplace(ktx, texture);
+        }
+        auto texture = texturesGPU_[ktx];
+        if (!skyboxesGPU_.contains(ktx))
+        {
+            auto skybox = filament::Skybox::Builder()
+                              .environment(texture)
+                              .showSun(false)
+                              .build(*engineGPU_);
+            skyboxesGPU_.emplace(ktx, skybox);
+        }
+        scene->setSkybox(skyboxesGPU_[ktx]);
+        LOG_INFO("added skybox {} to scene {}", ktx, sceneKey);
+    }
+    inline void addModel2Scene(const std::string &sceneKey, const std::string &modelKey, const std::string &loadedFile) noexcept
+    {
+        syncNode2GPU(getScene(sceneKey), getEntity(modelKey), modelsCPU_[loadedFile]);
+        LOG_INFO("added model {} to scene {}", modelKey, sceneKey);
+    }
+    inline void syncNode2GPU(filament::Scene *scene, utils::Entity dst, Node &node) noexcept
+    {
         scene->addEntity(dst);
-        syncNode2GPU(dst, model);
-        for (auto &[name, child] : model.children)
-        {
-            auto entity = getEntity(name);
-            scene->addEntity(entity);
-            syncNode2GPU(entity, child);
-            syncParent2GPU(entity, dst);
-        }
-        syncTransform2GPU(dst, model.transform);
-    }
-    inline void syncNode2GPU(utils::Entity dst, Node &node) noexcept
-    {
-        filament::RenderableManager::Builder builder(node.meshes.size());
-        builder.boundingBox(node.bound);
-        size_t idx = 0;
-        for (auto &[_, primitive] : node.meshes)
-        {
-            builder.geometry(idx,
-                             filament::RenderableManager::PrimitiveType::TRIANGLES,
-                             verticesGPU_,
-                             indicesGPU_,
-                             primitive.indexOffset,
-                             primitive.indexCount)
-                .material(idx,
-                          primitive.material.material);
-            ++idx;
-        }
-        builder.build(*engineGPU_, dst);
         syncTransform2GPU(dst, node.transform);
+        if (!node.meshes.empty())
+        {
+            filament::RenderableManager::Builder builder(node.meshes.size());
+            auto sphere = node.bound.getBoundingSphere();
+            builder.boundingBox(filament::Box().set(sphere.xyz - sphere.w, sphere.xyz + sphere.w));
+            size_t idx = 0;
+            for (auto &[_, primitive] : node.meshes)
+            {
+                builder.geometry(idx,
+                                 filament::RenderableManager::PrimitiveType::TRIANGLES, ///////////////////////////////////////////////////////
+                                 verticesGPU_,
+                                 indicesGPU_,
+                                 primitive.indexOffset,
+                                 primitive.indexCount)
+                    .material(idx,
+                              primitive.material.material);
+                ++idx;
+            }
+            builder.build(*engineGPU_, dst);
+        }
+        for (auto &[key, child] : node.children)
+        {
+            auto entity = getEntity(key);
+            syncParent2GPU(entity, dst);
+            syncNode2GPU(scene, entity, child);
+        }
     }
     inline void syncTransform2GPU(utils::Entity dst, filament::math::mat4f &transform) noexcept
     {
@@ -188,7 +295,7 @@ public:
     }
 
 private:
-    Node importNode(aiNode *node, aiMesh *meshes[], aiMaterial *materials[], const std::string &filamat)
+    Node importNode(aiNode *node, aiMesh *meshes[], aiMaterial *materials[], aiTexture *textures[], const std::string &file, const std::string &filamat)
     {
         assert(node);
         assert(meshes);
@@ -198,13 +305,14 @@ private:
         tmp.meshes.reserve(node->mNumMeshes);
         filament::math::float3 nodeMin;
         filament::math::float3 nodeMax;
+        LOG_TRACE("node key: {}, mesh num: {}, children num: {}", node->mName.C_Str(), node->mNumMeshes, node->mNumChildren);
         for (unsigned int i = 0; i < node->mNumMeshes; ++i)
         {
             aiMesh *mesh = meshes[node->mMeshes[i]];
-            std::string name = mesh->mName.C_Str();
-            tmp.meshes.emplace(name, importMesh(mesh, materials[mesh->mMaterialIndex], filamat));
-            filament::math::float3 meshMin = tmp.meshes[name].bound.getMin();
-            filament::math::float3 meshMax = tmp.meshes[name].bound.getMax();
+            std::string key = mesh->mName.C_Str();
+            tmp.meshes.emplace(key, importMesh(mesh, materials[mesh->mMaterialIndex], textures, file, filamat));
+            filament::math::float3 meshMin = tmp.meshes[key].bound.getMin();
+            filament::math::float3 meshMax = tmp.meshes[key].bound.getMax();
             if (i != 0)
             {
                 nodeMin.x = std::min(nodeMin.x, meshMin.x);
@@ -224,10 +332,10 @@ private:
         for (unsigned int i = 0; i < node->mNumChildren; ++i)
         {
             aiNode *child = node->mChildren[i];
-            std::string name = child->mName.C_Str();
-            tmp.children.emplace(name, importNode(child, meshes, materials, filamat));
-            filament::math::float3 childMin = tmp.children[name].bound.getMin();
-            filament::math::float3 childMax = tmp.children[name].bound.getMax();
+            std::string key = child->mName.C_Str();
+            tmp.children.emplace(key, importNode(child, meshes, materials, textures, file, filamat));
+            filament::math::float3 childMin = tmp.children[key].bound.getMin();
+            filament::math::float3 childMax = tmp.children[key].bound.getMax();
             if (i != 0)
             {
                 nodeMin.x = std::min(nodeMin.x, childMin.x);
@@ -246,7 +354,7 @@ private:
         tmp.bound.set(nodeMin, nodeMax);
         return tmp;
     }
-    Mesh importMesh(aiMesh *mesh, aiMaterial *material, const std::string &filamat)
+    Mesh importMesh(aiMesh *mesh, aiMaterial *material, aiTexture *textures[], const std::string &file, const std::string &filamat)
     {
         assert(mesh);
         assert(material);
@@ -269,7 +377,7 @@ private:
             }
         }
         tmp.bound.set(Converter::assimp2filament(mesh->mAABB.mMin), Converter::assimp2filament(mesh->mAABB.mMax));
-        tmp.material = importMaterial(material, filamat);
+        tmp.material = importMaterial(material, textures, file, filamat);
         return tmp;
     }
     Vertex importVertex(aiMesh *mesh, unsigned int i)
@@ -308,95 +416,161 @@ private:
         }
         return tmp;
     }
-    Material importMaterial(aiMaterial *material, const std::string &filamat)
+    Material importMaterial(aiMaterial *material, aiTexture *textures[], const std::string &file, const std::string &filamat)
     {
         assert(material);
+        assert(textures);
         Material tmp;
         tmp.material = loadShader(filamat)->createInstance();
-        material->Get(AI_MATKEY_COLOR_DIFFUSE, tmp.albedo);
-        material->Get(AI_MATKEY_ROUGHNESS_FACTOR, tmp.roughness);
-        material->Get(AI_MATKEY_METALLIC_FACTOR, tmp.metallic);
-        tmp.material->setParameter("albedo", tmp.albedo);
-        tmp.material->setParameter("roughness", tmp.roughness);
-        tmp.material->setParameter("metallic", tmp.metallic);
+        material->Get(AI_MATKEY_COLOR_DIFFUSE, tmp.diffuseFactor);
+        tmp.material->setParameter("diffuseFactor", tmp.diffuseFactor);
+        LOG_INFO("diffuseFactor {} {} {} {}", tmp.diffuseFactor.r, tmp.diffuseFactor.g, tmp.diffuseFactor.b, tmp.diffuseFactor.a);
+        material->Get(AI_MATKEY_ROUGHNESS_FACTOR, tmp.roughnessFactor);
+        tmp.material->setParameter("roughnessFactor", tmp.roughnessFactor);
+        LOG_INFO("roughnessFactor {}", tmp.roughnessFactor);
+        material->Get(AI_MATKEY_METALLIC_FACTOR, tmp.metallicFactor);
+        tmp.material->setParameter("metallicFactor", tmp.metallicFactor);
+        LOG_INFO("metallicFactor {}", tmp.metallicFactor);
         filament::TextureSampler sampler(filament::TextureSampler::MinFilter::LINEAR_MIPMAP_LINEAR,
                                          filament::TextureSampler::MagFilter::LINEAR,
                                          filament::TextureSampler::WrapMode::CLAMP_TO_EDGE);
-        aiString path;
-        if (material->GetTextureCount(aiTextureType_DIFFUSE) > 0)
+        size_t lastSlash = file.find_last_of("/\\");
+        std::string baseDir = (lastSlash == std::string::npos) ? "textures/" : file.substr(0, lastSlash + 1) + "textures/";
+        auto resolveAndLoad = [&](aiTextureType type, const char *paramName) -> bool
         {
-            if (material->GetTexture(aiTextureType_DIFFUSE, 0, &path) == AI_SUCCESS)
+            aiString path;
+            filament::Texture *texture = nullptr;
+            if (material->GetTexture(type, 0, &path) == AI_SUCCESS)
             {
-                tmp.material->setParameter("diffuse", loadMaterialAsyncTextures2GPU(path.C_Str()), sampler);
+                std::string pathStr(path.C_Str());
+                if (pathStr.empty())
+                    return false;
+                if (pathStr[0] == '*')
+                {
+                    int index = std::stoi(pathStr.substr(1));
+                    aiTexture *embedded = textures[index];
+                    std::string key = baseDir + pathStr;
+                    texture = loadEmbeddedMaterialAsyncTextures2GPU(embedded, key, ((type == aiTextureType_DIFFUSE || type == aiTextureType_BASE_COLOR) ? filament::Texture::InternalFormat::SRGB8_A8 : filament::Texture::InternalFormat::RGBA8));
+                    LOG_DEBUG("load {}", key); ////////////////////
+                }
+                else
+                {
+                    size_t p = pathStr.find_last_of("/\\");
+                    std::string fileName = (p == std::string::npos) ? pathStr : pathStr.substr(p + 1);
+                    std::string fullPath = baseDir + fileName;
+                    texture = loadLocalMaterialAsyncTextures2GPU(fullPath, ((type == aiTextureType_DIFFUSE || type == aiTextureType_BASE_COLOR) ? filament::Texture::InternalFormat::SRGB8_A8 : filament::Texture::InternalFormat::RGBA8));
+                    LOG_DEBUG("load {}", fullPath); ////////////////////
+                }
+                if (!texture)
+                {
+                    LOG_ERROR("load {} failed", pathStr);
+                    return false;
+                }
             }
-        }
+            tmp.material->setParameter(paramName, texture, sampler);
+            return true;
+        };
+        if (material->GetTextureCount(aiTextureType_BASE_COLOR) > 0)
+            resolveAndLoad(aiTextureType_BASE_COLOR, "diffuse");
+        else
+            resolveAndLoad(aiTextureType_DIFFUSE, "diffuse");
         if (material->GetTextureCount(aiTextureType_NORMALS) > 0)
-        {
-            if (material->GetTexture(aiTextureType_NORMALS, 0, &path) == AI_SUCCESS)
-            {
-                tmp.material->setParameter("normal", loadMaterialAsyncTextures2GPU(path.C_Str()), sampler);
-            }
-        }
-        if (material->GetTextureCount(aiTextureType_AMBIENT_OCCLUSION) > 0)
-        {
-            if (material->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &path) == AI_SUCCESS)
-            {
-                tmp.material->setParameter("occlusion", loadMaterialAsyncTextures2GPU(path.C_Str()), sampler);
-            }
-        }
-        if (material->GetTextureCount(aiTextureType_SHININESS) > 0)
-        {
-            if (material->GetTexture(aiTextureType_SHININESS, 0, &path) == AI_SUCCESS)
-            {
-                tmp.material->setParameter("roughness", loadMaterialAsyncTextures2GPU(path.C_Str()), sampler);
-            }
-        }
-        if (material->GetTextureCount(aiTextureType_METALNESS) > 0)
-        {
-            if (material->GetTexture(aiTextureType_METALNESS, 0, &path) == AI_SUCCESS)
-            {
-                tmp.material->setParameter("metallic", loadMaterialAsyncTextures2GPU(path.C_Str()), sampler);
-            }
-        }
-        if (material->GetTextureCount(aiTextureType_EMISSIVE) > 0)
-        {
-            if (material->GetTexture(aiTextureType_EMISSIVE, 0, &path) == AI_SUCCESS)
-            {
-                tmp.material->setParameter("emissive", loadMaterialAsyncTextures2GPU(path.C_Str()), sampler);
-            }
-        }
+            resolveAndLoad(aiTextureType_NORMALS, "normal");
+        else if (material->GetTextureCount(aiTextureType_HEIGHT) > 0)
+            resolveAndLoad(aiTextureType_HEIGHT, "normal");
+        // resolveAndLoad(aiTextureType_METALNESS, "metallic");
+        // if (material->GetTextureCount(aiTextureType_DIFFUSE_ROUGHNESS) > 0)
+        //     resolveAndLoad(aiTextureType_DIFFUSE_ROUGHNESS, "roughness");
+        // else
+        //     resolveAndLoad(aiTextureType_SHININESS, "roughness");
+        // resolveAndLoad(aiTextureType_AMBIENT_OCCLUSION, "occlusion");
+        // resolveAndLoad(aiTextureType_EMISSIVE, "emissive");
         return tmp;
     }
     filament::Material *loadShader(const std::string &filamat)
     {
-        if (shadersGPU_.find(filamat) != shadersGPU_.end())
+        if (shadersGPU_.contains(filamat))
             return shadersGPU_[filamat];
-        std::ifstream ifs(filamat, std::ios::binary | std::ios::ate);
-        if (!ifs)
-        {
-            LOG_ERROR("cannot open {}", filamat);
+        std::vector<uint8_t> buffer;
+        if (!readFile(filamat, buffer))
             return nullptr;
-        }
-        std::streamsize size = ifs.tellg();
-        ifs.seekg(0, std::ios::beg);
-        std::vector<char> buffer(size);
-        if (!ifs.read(buffer.data(), size))
-        {
-            LOG_ERROR("cannot read {}", filamat);
-            return nullptr;
-        }
         filament::Material *ptr = filament::Material::Builder()
                                       .package(buffer.data(), buffer.size())
                                       .build(*engineGPU_);
         shadersGPU_.emplace(filamat, ptr);
         return ptr;
     }
-    filament::Texture *loadMaterialAsyncTextures2GPU(const std::string &file)
+    filament::Texture *loadEmbeddedMaterialAsyncTextures2GPU(const aiTexture *texture,
+                                                             const std::string &key,
+                                                             filament::Texture::InternalFormat format)
     {
-        if (texturesGPU_.find(file) != texturesGPU_.end())
+        assert(texture);
+        if (texturesGPU_.contains(key))
+            return texturesGPU_[key];
+        int width = 0;
+        int height = 0;
+        stbi_uc *image = nullptr;
+        if (texture->mHeight == 0)
+        {
+            image = stbi_load_from_memory(
+                reinterpret_cast<const stbi_uc *>(texture->pcData),
+                texture->mWidth,
+                &width,
+                &height,
+                nullptr,
+                4);
+            if (!image)
+                return nullptr;
+        }
+        else
+        {
+            width = texture->mWidth;
+            height = texture->mHeight;
+            image = reinterpret_cast<stbi_uc *>(
+                malloc(size_t(width * height * 4)));
+            aiTexel *src = texture->pcData;
+            stbi_uc *dst = image;
+            for (int i = 0; i < width * height; ++i)
+            {
+                dst[4 * i + 0] = src[i].r;
+                dst[4 * i + 1] = src[i].g;
+                dst[4 * i + 2] = src[i].b;
+                dst[4 * i + 3] = src[i].a;
+            }
+        }
+        uint32_t levels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
+        filament::Texture *ptr = filament::Texture::Builder()
+                                     .width(uint32_t(width))
+                                     .height(uint32_t(height))
+                                     .levels(levels)
+                                     .format(format)
+                                     .sampler(filament::Texture::Sampler::SAMPLER_2D)
+                                     .build(*engineGPU_);
+        ptr->setImage(*engineGPU_, 0,
+                      filament::Texture::PixelBufferDescriptor(
+                          image,
+                          size_t(width * height * 4),
+                          filament::Texture::Format::RGBA,
+                          filament::Texture::Type::UBYTE,
+                          [](void *mem, size_t, void *)
+                          { free(mem); }));
+        // ptr->generateMipmaps(*engineGPU_);///////////////////////
+        texturesGPU_.emplace(key, ptr);
+        return ptr;
+    }
+    filament::Texture *loadLocalMaterialAsyncTextures2GPU(const std::string &file,
+                                                          filament::Texture::InternalFormat format)
+    {
+        if (texturesGPU_.contains(file))
             return texturesGPU_[file];
-        int width, height, channels;
-        stbi_uc *image = stbi_load(file.c_str(), &width, &height, &channels, 4);
+        int width = 0;
+        int height = 0;
+        stbi_uc *image = stbi_load(
+            file.c_str(),
+            &width,
+            &height,
+            nullptr,
+            4);
         if (!image)
             return nullptr;
         uint32_t levels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
@@ -404,7 +578,7 @@ private:
                                      .width(uint32_t(width))
                                      .height(uint32_t(height))
                                      .levels(levels)
-                                     .format(filament::Texture::InternalFormat::RGBA8)
+                                     .format(format)
                                      .sampler(filament::Texture::Sampler::SAMPLER_2D)
                                      .build(*engineGPU_);
         ptr->setImage(*engineGPU_, 0,
@@ -415,8 +589,63 @@ private:
                           filament::Texture::Type::UBYTE,
                           [](void *mem, size_t, void *)
                           { stbi_image_free(mem); }));
+        // ptr->generateMipmaps(*engineGPU_);///////////////////////
         texturesGPU_.emplace(file, ptr);
-        ptr->generateMipmaps(*engineGPU_);
         return ptr;
+    }
+    bool readFile(const std::string &path, std::vector<uint8_t> &buffer)
+    {
+        std::ifstream ifs(path, std::ios::binary | std::ios::ate);
+        if (!ifs)
+        {
+            LOG_ERROR("cannot open {}", path);
+            return false;
+        }
+        std::streamsize size = ifs.tellg();
+        ifs.seekg(0, std::ios::beg);
+        buffer.resize(static_cast<size_t>(size));
+        if (!ifs.read(reinterpret_cast<char *>(buffer.data()), size))
+        {
+            LOG_ERROR("cannot read {}", path);
+            return false;
+        }
+        return true;
+    }
+    bool readSphericalHarmonics(const std::string &path, filament::math::float3 sh[9])
+    {
+        std::ifstream ifs(path);
+        if (!ifs)
+        {
+            LOG_ERROR("cannot open spherical harmonics file {}", path);
+            for (int i = 0; i < 9; i++)
+                sh[i] = filament::math::float3(1.0f);
+            return false;
+        }
+        std::string line;
+        int index = 0;
+        while (std::getline(ifs, line) && index < 9)
+        {
+            if (line.empty() || line[0] == '/' || line[0] == '#')
+                continue;
+            size_t start = line.find('(');
+            size_t end = line.find(')');
+            if (start != std::string::npos && end != std::string::npos)
+            {
+                std::string values = line.substr(start + 1, end - start - 1);
+                float r, g, b;
+                if (sscanf(values.c_str(), "%f, %f, %f", &r, &g, &b) == 3)
+                {
+                    sh[index] = filament::math::float3(r, g, b);
+                    ++index;
+                    LOG_TRACE(values);
+                }
+            }
+        }
+        if (index < 9)
+        {
+            LOG_ERROR("incomplete spherical harmonics data, got {} bands", index);
+            return false;
+        }
+        return true;
     }
 };
