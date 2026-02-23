@@ -1,0 +1,23 @@
+material 
+{
+    name : "unlit",
+    shadingModel : unlit,
+    parameters : [
+        { type : sampler2d, name : baseColor },
+        { type : float4,    name : baseColorFactor }
+    ],
+    requires : [
+        "uv0"
+    ],
+}
+
+fragment 
+{
+    void material(inout MaterialInputs material) 
+    {
+        prepareMaterial(material);
+
+        vec4 baseColorMap = texture(materialParams_baseColor, getUV0());
+        material.baseColor = baseColorMap * materialParams.baseColorFactor;
+    }
+}

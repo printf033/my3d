@@ -1,0 +1,47 @@
+material
+{
+    name : "lit",
+    shadingModel : lit,
+    parameters : [
+        { type : sampler2d, name : baseColor },
+        { type : sampler2d, name : emissive },
+        { type : sampler2d, name : normal },
+        { type : sampler2d, name : ambientOcclusion },
+        { type : sampler2d, name : roughness },
+        { type : sampler2d, name : metallic },
+        { type : float4,    name : baseColorFactor },
+        { type : float4,    name : emissiveFactor },
+        { type : float,     name : roughnessFactor },
+        { type : float,     name : metallicFactor }
+    ],
+    requires : [
+        "uv0",
+        "tangents"
+    ],
+}
+
+fragment
+{
+    void material(inout MaterialInputs material)
+    {
+        prepareMaterial(material);
+
+        vec4 baseColorMap = texture(materialParams_baseColor, getUV0());
+        material.baseColor = baseColorMap * materialParams.baseColorFactor;
+
+        vec4 emissiveMap = texture(materialParams_emissive, getUV0());
+        material.emissive = emissiveMap * materialParams.emissiveFactor;
+
+        vec3 normalMap = texture(materialParams_normal, getUV0()).xyz * 2.0 - 1.0;
+        material.normal = normalize(getWorldTangentFrame() * normalMap);
+
+        float ambientOcclusionMap = texture(materialParams_ambientOcclusion, getUV0()).r;
+        material.ambientOcclusion = ambientOcclusionMap;
+
+        float roughnessMap = texture(materialParams_roughness, getUV0()).r;
+        material.roughness = roughnessMap * materialParams.roughnessFactor;
+
+        float metallicMap = texture(materialParams_metallic, getUV0()).r;
+        material.metallic = metallicMap * materialParams.metallicFactor;
+    }
+}

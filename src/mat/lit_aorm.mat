@@ -1,0 +1,41 @@
+material 
+{
+    name : "lit_aorm",
+    shadingModel : lit,
+    parameters : [
+        { type : sampler2d, name : baseColor },
+        { type : sampler2d, name : emissive },
+        { type : sampler2d, name : normal },
+        { type : sampler2d, name : aorm },
+        { type : float4,    name : baseColorFactor },
+        { type : float4,    name : emissiveFactor },
+        { type : float,     name : roughnessFactor },
+        { type : float,     name : metallicFactor }
+    ],
+    requires : [
+        "uv0",
+        "tangents"
+    ],
+}
+
+fragment 
+{
+    void material(inout MaterialInputs material) 
+    {
+        prepareMaterial(material);
+
+        vec4 baseColorMap = texture(materialParams_baseColor, getUV0());
+        material.baseColor = baseColorMap * materialParams.baseColorFactor;
+
+        vec4 emissiveMap = texture(materialParams_emissive, getUV0());
+        material.emissive = emissiveMap * materialParams.emissiveFactor;
+
+        vec3 normalMap = texture(materialParams_normal, getUV0()).xyz * 2.0 - 1.0;
+        material.normal = normalize(getWorldTangentFrame() * normalMap);
+
+        vec4 aormMap = texture(materialParams_aorm, getUV0());
+        material.ambientOcclusion = aormMap.r;
+        material.roughness = aormMap.g * materialParams.roughnessFactor;
+        material.metallic  = aormMap.b * materialParams.metallicFactor;
+    }
+}

@@ -84,7 +84,7 @@ public:
             if (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE)
                 LOG_ERROR(importer.GetErrorString());
         }
-        LOG_INFO("loaded model {}", file);
+        LOG_INFO("load model {}", file);
     }
     inline void asyncVerticesIndices2GPU() noexcept
     {
@@ -177,10 +177,10 @@ public:
             }
             if (!texture)
             {
-                LOG_ERROR("loaded {}", ktx);
+                LOG_ERROR("load {}", ktx);
                 return;
             }
-            LOG_DEBUG("loaded ibl {}: {}x{}, {} levels", ktx, texture->getWidth(0), texture->getHeight(0), texture->getLevels());
+            LOG_DEBUG("load ibl {}: {}x{}, {} levels", ktx, texture->getWidth(0), texture->getHeight(0), texture->getLevels());
             texturesGPU_.emplace(ktx, texture);
         }
         auto texture = texturesGPU_[ktx];
@@ -196,7 +196,7 @@ public:
             imageBasedLightsGPU_.emplace(ktx, ibl);
         }
         scene->setIndirectLight(imageBasedLightsGPU_[ktx]);
-        LOG_INFO("added ibl {} to scene {}", ktx, sceneKey);
+        LOG_INFO("add ibl {} to scene {}", ktx, sceneKey);
     }
     void addSkybox2Scene(const std::string &sceneKey, const std::string &ktx)
     {
@@ -229,10 +229,10 @@ public:
             }
             if (!texture)
             {
-                LOG_ERROR("loaded {}", ktx);
+                LOG_ERROR("load {}", ktx);
                 return;
             }
-            LOG_DEBUG("loaded skybox {}: {}x{}, {} levels", ktx, texture->getWidth(0), texture->getHeight(0), texture->getLevels());
+            LOG_DEBUG("load skybox {}: {}x{}, {} levels", ktx, texture->getWidth(0), texture->getHeight(0), texture->getLevels());
             texturesGPU_.emplace(ktx, texture);
         }
         auto texture = texturesGPU_[ktx];
@@ -245,12 +245,12 @@ public:
             skyboxesGPU_.emplace(ktx, skybox);
         }
         scene->setSkybox(skyboxesGPU_[ktx]);
-        LOG_INFO("added skybox {} to scene {}", ktx, sceneKey);
+        LOG_INFO("add skybox {} to scene {}", ktx, sceneKey);
     }
     inline void addModel2Scene(const std::string &sceneKey, const std::string &modelKey, const std::string &loadedFile) noexcept
     {
         syncNode2GPU(getScene(sceneKey), getEntity(modelKey), modelsCPU_[loadedFile]);
-        LOG_INFO("added model {} to scene {}", modelKey, sceneKey);
+        LOG_INFO("add model {} to scene {}", modelKey, sceneKey);
     }
     inline void syncNode2GPU(filament::Scene *scene, utils::Entity dst, Node &node) noexcept
     {
@@ -265,7 +265,7 @@ public:
             for (auto &[_, primitive] : node.meshes)
             {
                 builder.geometry(idx,
-                                 filament::RenderableManager::PrimitiveType::TRIANGLES, ///////////////////////////////////////////////////////
+                                 filament::RenderableManager::PrimitiveType::TRIANGLES,
                                  verticesGPU_,
                                  indicesGPU_,
                                  primitive.indexOffset,
@@ -419,18 +419,8 @@ private:
     Material importMaterial(aiMaterial *material, aiTexture *textures[], const std::string &file, const std::string &filamat)
     {
         assert(material);
-        assert(textures);
         Material tmp;
         tmp.material = loadShader(filamat)->createInstance();
-        material->Get(AI_MATKEY_COLOR_DIFFUSE, tmp.diffuseFactor);
-        tmp.material->setParameter("diffuseFactor", tmp.diffuseFactor);
-        LOG_INFO("diffuseFactor {} {} {} {}", tmp.diffuseFactor.r, tmp.diffuseFactor.g, tmp.diffuseFactor.b, tmp.diffuseFactor.a);
-        material->Get(AI_MATKEY_ROUGHNESS_FACTOR, tmp.roughnessFactor);
-        tmp.material->setParameter("roughnessFactor", tmp.roughnessFactor);
-        LOG_INFO("roughnessFactor {}", tmp.roughnessFactor);
-        material->Get(AI_MATKEY_METALLIC_FACTOR, tmp.metallicFactor);
-        tmp.material->setParameter("metallicFactor", tmp.metallicFactor);
-        LOG_INFO("metallicFactor {}", tmp.metallicFactor);
         filament::TextureSampler sampler(filament::TextureSampler::MinFilter::LINEAR_MIPMAP_LINEAR,
                                          filament::TextureSampler::MagFilter::LINEAR,
                                          filament::TextureSampler::WrapMode::CLAMP_TO_EDGE);
@@ -447,11 +437,12 @@ private:
                     return false;
                 if (pathStr[0] == '*')
                 {
+                    assert(textures);
                     int index = std::stoi(pathStr.substr(1));
                     aiTexture *embedded = textures[index];
                     std::string key = baseDir + pathStr;
                     texture = loadEmbeddedMaterialAsyncTextures2GPU(embedded, key, ((type == aiTextureType_DIFFUSE || type == aiTextureType_BASE_COLOR) ? filament::Texture::InternalFormat::SRGB8_A8 : filament::Texture::InternalFormat::RGBA8));
-                    LOG_DEBUG("load {}", key); ////////////////////
+                    LOG_DEBUG("load {}", key);
                 }
                 else
                 {
@@ -459,11 +450,11 @@ private:
                     std::string fileName = (p == std::string::npos) ? pathStr : pathStr.substr(p + 1);
                     std::string fullPath = baseDir + fileName;
                     texture = loadLocalMaterialAsyncTextures2GPU(fullPath, ((type == aiTextureType_DIFFUSE || type == aiTextureType_BASE_COLOR) ? filament::Texture::InternalFormat::SRGB8_A8 : filament::Texture::InternalFormat::RGBA8));
-                    LOG_DEBUG("load {}", fullPath); ////////////////////
+                    LOG_DEBUG("load {}", fullPath);
                 }
                 if (!texture)
                 {
-                    LOG_ERROR("load {} failed", pathStr);
+                    LOG_ERROR("load {}", pathStr);
                     return false;
                 }
             }
@@ -471,20 +462,56 @@ private:
             return true;
         };
         if (material->GetTextureCount(aiTextureType_BASE_COLOR) > 0)
-            resolveAndLoad(aiTextureType_BASE_COLOR, "diffuse");
+        {
+            material->Get(AI_MATKEY_COLOR_DIFFUSE, tmp.baseColorFactor);
+            tmp.material->setParameter("baseColorFactor", tmp.baseColorFactor);
+            LOG_INFO("baseColorFactor {} {} {} {}", tmp.baseColorFactor.r, tmp.baseColorFactor.g, tmp.baseColorFactor.b, tmp.baseColorFactor.a);
+            resolveAndLoad(aiTextureType_BASE_COLOR, "baseColor");
+        }
         else
-            resolveAndLoad(aiTextureType_DIFFUSE, "diffuse");
-        if (material->GetTextureCount(aiTextureType_NORMALS) > 0)
-            resolveAndLoad(aiTextureType_NORMALS, "normal");
-        else if (material->GetTextureCount(aiTextureType_HEIGHT) > 0)
-            resolveAndLoad(aiTextureType_HEIGHT, "normal");
-        // resolveAndLoad(aiTextureType_METALNESS, "metallic");
+        {
+            material->Get(AI_MATKEY_COLOR_DIFFUSE, tmp.baseColorFactor);
+            tmp.material->setParameter("baseColorFactor", tmp.baseColorFactor);
+            LOG_INFO("baseColorFactor {} {} {} {}", tmp.baseColorFactor.r, tmp.baseColorFactor.g, tmp.baseColorFactor.b, tmp.baseColorFactor.a);
+            resolveAndLoad(aiTextureType_DIFFUSE, "baseColor");
+        }
+        // if (material->GetTextureCount(aiTextureType_EMISSIVE) > 0)
+        // {
+        //     material->Get(AI_MATKEY_COLOR_EMISSIVE, tmp.emissiveFactor);
+        //     material->Get(AI_MATKEY_EMISSIVE_INTENSITY, tmp.emissiveFactor.a);
+        //     tmp.material->setParameter("emissiveFactor", tmp.emissiveFactor);
+        //     LOG_INFO("emissiveFactor {} {} {} {}", tmp.emissiveFactor.r, tmp.emissiveFactor.g, tmp.emissiveFactor.b, tmp.emissiveFactor.a);
+        //     resolveAndLoad(aiTextureType_EMISSIVE, "emissive");
+        // }
+        // if (material->GetTextureCount(aiTextureType_NORMALS) > 0)
+        //     resolveAndLoad(aiTextureType_NORMALS, "normal");
+        // else if (material->GetTextureCount(aiTextureType_HEIGHT) > 0)
+        //     resolveAndLoad(aiTextureType_HEIGHT, "normal");
+        // if (material->GetTextureCount(aiTextureType_AMBIENT_OCCLUSION) > 0)
+        //     resolveAndLoad(aiTextureType_AMBIENT_OCCLUSION, "ambientOcclusion");
+        // else if (material->GetTextureCount(aiTextureType_LIGHTMAP) > 0)
+        //     resolveAndLoad(aiTextureType_LIGHTMAP, "ambientOcclusion");
         // if (material->GetTextureCount(aiTextureType_DIFFUSE_ROUGHNESS) > 0)
+        // {
+        //     material->Get(AI_MATKEY_ROUGHNESS_FACTOR, tmp.roughnessFactor);
+        //     tmp.material->setParameter("roughnessFactor", tmp.roughnessFactor);
+        //     LOG_INFO("roughnessFactor {}", tmp.roughnessFactor);
         //     resolveAndLoad(aiTextureType_DIFFUSE_ROUGHNESS, "roughness");
-        // else
+        // }
+        // else if (material->GetTextureCount(aiTextureType_SHININESS) > 0)
+        // {
+        //     material->Get(AI_MATKEY_ROUGHNESS_FACTOR, tmp.roughnessFactor);
+        //     tmp.material->setParameter("roughnessFactor", tmp.roughnessFactor);
+        //     LOG_INFO("roughnessFactor {}", tmp.roughnessFactor);
         //     resolveAndLoad(aiTextureType_SHININESS, "roughness");
-        // resolveAndLoad(aiTextureType_AMBIENT_OCCLUSION, "occlusion");
-        // resolveAndLoad(aiTextureType_EMISSIVE, "emissive");
+        // }
+        // if (material->GetTextureCount(aiTextureType_METALNESS) > 0)
+        // {
+        //     material->Get(AI_MATKEY_METALLIC_FACTOR, tmp.metallicFactor);
+        //     tmp.material->setParameter("metallicFactor", tmp.metallicFactor);
+        //     LOG_INFO("metallicFactor {}", tmp.metallicFactor);
+        //     resolveAndLoad(aiTextureType_METALNESS, "metallic");
+        // }
         return tmp;
     }
     filament::Material *loadShader(const std::string &filamat)
