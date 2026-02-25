@@ -30,6 +30,7 @@
 #include <filament/IndexBuffer.h>
 #include <filament/Texture.h>
 #include <filament/IndirectLight.h>
+#include <filament/LightManager.h>
 #include <filament/Skybox.h>
 #include <ktxreader/Ktx1Reader.h>
 #include <ktxreader/Ktx2Reader.h>
@@ -271,7 +272,7 @@ public:
                                  primitive.indexOffset,
                                  primitive.indexCount)
                     .material(idx,
-                              primitive.material.material);
+                              primitive.material);
                 ++idx;
             }
             builder.build(*engineGPU_, dst);
@@ -362,11 +363,50 @@ private:
         uint32_t base = static_cast<uint32_t>(verticesCPU_.size());
         tmp.indexOffset = static_cast<uint32_t>(indicesCPU_.size());
         tmp.indexCount = mesh->mNumFaces * 3U;
+        // vertices
         verticesCPU_.resize(verticesCPU_.size() + mesh->mNumVertices);
         for (unsigned int i = 0; i < mesh->mNumVertices; ++i)
         {
-            verticesCPU_[base + i] = importVertex(mesh, i);
+            auto &vertex = verticesCPU_[base + i];
+            // position
+            vertex.xyz = {mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z};
+            // normal
+            if (mesh->HasNormals())
+            {
+                filament::math::float3 n = {mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z};
+                if (mesh->HasTangentsAndBitangents())
+                {
+                    filament::math::float3 t = {mesh->mTangents[i].x, mesh->mTangents[i].y, mesh->mTangents[i].z};
+                    filament::math::float3 b = {mesh->mBitangents[i].x, mesh->mBitangents[i].y, mesh->mBitangents[i].z};
+                    vertex.tbn = filament::math::mat3f::packTangentFrame({t, b, n});
+                }
+                else
+                {
+                    filament::math::float3 up = (std::abs(n.z) < 0.999f)
+                                                    ? filament::math::float3{0.0f, 0.0f, 1.0f}
+                                                    : filament::math::float3{1.0f, 0.0f, 0.0f};
+                    filament::math::float3 t = normalize(cross(up, n));
+                    filament::math::float3 b = cross(n, t);
+                    vertex.tbn = filament::math::mat3f::packTangentFrame({t, b, n});
+                }
+            }
+            else
+            {
+                vertex.tbn = {0.0f, 0.0f, 0.0f, 1.0f};
+                LOG_WARN("vertex {} {} {} has no normal");
+            }
+            // texture coordinate
+            if (mesh->HasTextureCoords(0))
+            {
+                vertex.uv = {mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][i].y};
+            }
+            else
+            {
+                vertex.uv = {0.0f, 0.0f};
+                LOG_WARN("vertex {} {} {} has no texture coordinate");
+            }
         }
+        // indices
         indicesCPU_.reserve(indicesCPU_.size() + mesh->mNumFaces * 3);
         for (unsigned int i = 0; i < mesh->mNumFaces; ++i)
         {
@@ -376,50 +416,9 @@ private:
                 indicesCPU_.push_back(base + index);
             }
         }
+        // box
         tmp.bound.set(Converter::assimp2filament(mesh->mAABB.mMin), Converter::assimp2filament(mesh->mAABB.mMax));
-        tmp.material = importMaterial(material, textures, file, filamat);
-        return tmp;
-    }
-    Vertex importVertex(aiMesh *mesh, unsigned int i)
-    {
-        assert(mesh);
-        Vertex tmp;
-        tmp.xyz = {mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z};
-        if (mesh->HasNormals())
-        {
-            filament::math::float3 n = {mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z};
-            if (mesh->HasTangentsAndBitangents())
-            {
-                filament::math::float3 t = {mesh->mTangents[i].x, mesh->mTangents[i].y, mesh->mTangents[i].z};
-                filament::math::float3 b = {mesh->mBitangents[i].x, mesh->mBitangents[i].y, mesh->mBitangents[i].z};
-                tmp.tbn = filament::math::mat3f::packTangentFrame({t, b, n});
-            }
-            else
-            {
-                filament::math::float3 up = (std::abs(n.z) < 0.999f) ? filament::math::float3{0.0f, 0.0f, 1.0f} : filament::math::float3{1.0f, 0.0f, 0.0f};
-                filament::math::float3 t = normalize(cross(up, n));
-                filament::math::float3 b = cross(n, t);
-                tmp.tbn = filament::math::mat3f::packTangentFrame({t, b, n});
-            }
-        }
-        else
-        {
-            tmp.tbn = {0.0f, 0.0f, 0.0f, 1.0f};
-        }
-        if (mesh->HasTextureCoords(0))
-        {
-            tmp.uv = {mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][i].y};
-        }
-        else
-        {
-            tmp.uv = {0.0f, 0.0f};
-        }
-        return tmp;
-    }
-    Material importMaterial(aiMaterial *material, aiTexture *textures[], const std::string &file, const std::string &filamat)
-    {
-        assert(material);
-        Material tmp;
+        // material
         tmp.material = loadShader(filamat)->createInstance();
         filament::TextureSampler sampler(filament::TextureSampler::MinFilter::LINEAR_MIPMAP_LINEAR,
                                          filament::TextureSampler::MagFilter::LINEAR,
@@ -461,57 +460,61 @@ private:
             tmp.material->setParameter(paramName, texture, sampler);
             return true;
         };
+        // base color
+        aiColor4D baseColorFactor;
+        material->Get(AI_MATKEY_COLOR_DIFFUSE, baseColorFactor);
+        tmp.material->setParameter("baseColorFactor", Converter::assimp2filament(baseColorFactor));
+        LOG_INFO("baseColorFactor {} {} {} {}", baseColorFactor.r, baseColorFactor.g, baseColorFactor.b, baseColorFactor.a);
         if (material->GetTextureCount(aiTextureType_BASE_COLOR) > 0)
-        {
-            material->Get(AI_MATKEY_COLOR_DIFFUSE, tmp.baseColorFactor);
-            tmp.material->setParameter("baseColorFactor", tmp.baseColorFactor);
-            LOG_INFO("baseColorFactor {} {} {} {}", tmp.baseColorFactor.r, tmp.baseColorFactor.g, tmp.baseColorFactor.b, tmp.baseColorFactor.a);
             resolveAndLoad(aiTextureType_BASE_COLOR, "baseColor");
-        }
         else
-        {
-            material->Get(AI_MATKEY_COLOR_DIFFUSE, tmp.baseColorFactor);
-            tmp.material->setParameter("baseColorFactor", tmp.baseColorFactor);
-            LOG_INFO("baseColorFactor {} {} {} {}", tmp.baseColorFactor.r, tmp.baseColorFactor.g, tmp.baseColorFactor.b, tmp.baseColorFactor.a);
             resolveAndLoad(aiTextureType_DIFFUSE, "baseColor");
+        // emissive
+        if (material->GetTextureCount(aiTextureType_EMISSIVE) > 0)
+        {
+            aiColor4D emissiveFactor;
+            material->Get(AI_MATKEY_COLOR_EMISSIVE, emissiveFactor);
+            material->Get(AI_MATKEY_EMISSIVE_INTENSITY, emissiveFactor.a);
+            tmp.material->setParameter("emissiveFactor", Converter::assimp2filament(emissiveFactor));
+            LOG_INFO("emissiveFactor {} {} {} {}", emissiveFactor.r, emissiveFactor.g, emissiveFactor.b, emissiveFactor.a);
+            resolveAndLoad(aiTextureType_EMISSIVE, "emissive");
         }
-        // if (material->GetTextureCount(aiTextureType_EMISSIVE) > 0)
-        // {
-        //     material->Get(AI_MATKEY_COLOR_EMISSIVE, tmp.emissiveFactor);
-        //     material->Get(AI_MATKEY_EMISSIVE_INTENSITY, tmp.emissiveFactor.a);
-        //     tmp.material->setParameter("emissiveFactor", tmp.emissiveFactor);
-        //     LOG_INFO("emissiveFactor {} {} {} {}", tmp.emissiveFactor.r, tmp.emissiveFactor.g, tmp.emissiveFactor.b, tmp.emissiveFactor.a);
-        //     resolveAndLoad(aiTextureType_EMISSIVE, "emissive");
-        // }
-        // if (material->GetTextureCount(aiTextureType_NORMALS) > 0)
-        //     resolveAndLoad(aiTextureType_NORMALS, "normal");
-        // else if (material->GetTextureCount(aiTextureType_HEIGHT) > 0)
-        //     resolveAndLoad(aiTextureType_HEIGHT, "normal");
-        // if (material->GetTextureCount(aiTextureType_AMBIENT_OCCLUSION) > 0)
-        //     resolveAndLoad(aiTextureType_AMBIENT_OCCLUSION, "ambientOcclusion");
-        // else if (material->GetTextureCount(aiTextureType_LIGHTMAP) > 0)
-        //     resolveAndLoad(aiTextureType_LIGHTMAP, "ambientOcclusion");
-        // if (material->GetTextureCount(aiTextureType_DIFFUSE_ROUGHNESS) > 0)
-        // {
-        //     material->Get(AI_MATKEY_ROUGHNESS_FACTOR, tmp.roughnessFactor);
-        //     tmp.material->setParameter("roughnessFactor", tmp.roughnessFactor);
-        //     LOG_INFO("roughnessFactor {}", tmp.roughnessFactor);
-        //     resolveAndLoad(aiTextureType_DIFFUSE_ROUGHNESS, "roughness");
-        // }
-        // else if (material->GetTextureCount(aiTextureType_SHININESS) > 0)
-        // {
-        //     material->Get(AI_MATKEY_ROUGHNESS_FACTOR, tmp.roughnessFactor);
-        //     tmp.material->setParameter("roughnessFactor", tmp.roughnessFactor);
-        //     LOG_INFO("roughnessFactor {}", tmp.roughnessFactor);
-        //     resolveAndLoad(aiTextureType_SHININESS, "roughness");
-        // }
-        // if (material->GetTextureCount(aiTextureType_METALNESS) > 0)
-        // {
-        //     material->Get(AI_MATKEY_METALLIC_FACTOR, tmp.metallicFactor);
-        //     tmp.material->setParameter("metallicFactor", tmp.metallicFactor);
-        //     LOG_INFO("metallicFactor {}", tmp.metallicFactor);
-        //     resolveAndLoad(aiTextureType_METALNESS, "metallic");
-        // }
+        // normal
+        if (material->GetTextureCount(aiTextureType_NORMALS) > 0)
+            resolveAndLoad(aiTextureType_NORMALS, "normal");
+        else if (material->GetTextureCount(aiTextureType_HEIGHT) > 0)
+            resolveAndLoad(aiTextureType_HEIGHT, "normal");
+        // ambient occlusion
+        if (material->GetTextureCount(aiTextureType_AMBIENT_OCCLUSION) > 0)
+            resolveAndLoad(aiTextureType_AMBIENT_OCCLUSION, "ambientOcclusion");
+        else if (material->GetTextureCount(aiTextureType_LIGHTMAP) > 0)
+            resolveAndLoad(aiTextureType_LIGHTMAP, "ambientOcclusion");
+        // roughness
+        if (material->GetTextureCount(aiTextureType_DIFFUSE_ROUGHNESS) > 0)
+        {
+            float roughnessFactor;
+            material->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughnessFactor);
+            tmp.material->setParameter("roughnessFactor", roughnessFactor);
+            LOG_INFO("roughnessFactor {}", roughnessFactor);
+            resolveAndLoad(aiTextureType_DIFFUSE_ROUGHNESS, "roughness");
+        }
+        else if (material->GetTextureCount(aiTextureType_SHININESS) > 0)
+        {
+            float roughnessFactor;
+            material->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughnessFactor);
+            tmp.material->setParameter("roughnessFactor", roughnessFactor);
+            LOG_INFO("roughnessFactor {}", roughnessFactor);
+            resolveAndLoad(aiTextureType_SHININESS, "roughness");
+        }
+        // metallic
+        if (material->GetTextureCount(aiTextureType_METALNESS) > 0)
+        {
+            float metallicFactor;
+            material->Get(AI_MATKEY_METALLIC_FACTOR, metallicFactor);
+            tmp.material->setParameter("metallicFactor", metallicFactor);
+            LOG_INFO("metallicFactor {}", metallicFactor);
+            resolveAndLoad(aiTextureType_METALNESS, "metallic");
+        }
         return tmp;
     }
     filament::Material *loadShader(const std::string &filamat)

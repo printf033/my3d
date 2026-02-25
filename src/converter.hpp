@@ -2,6 +2,7 @@
 
 #include <assimp/matrix4x4.h>
 #include <assimp/quaternion.h>
+#include <assimp/color4.h>
 #include <math/mat4.h>
 #include <math/vec4.h>
 #include <math/vec3.h>
@@ -21,5 +22,10 @@ struct Converter
     {
         return filament::math::float3(
             src.x, src.y, src.z);
+    }
+    static inline filament::math::float4 assimp2filament(aiColor4D &src) noexcept
+    {
+        return filament::math::float4(
+            src.r, src.g, src.b, src.a);
     }
 };
