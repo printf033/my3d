@@ -49,9 +49,9 @@ class Engine
     std::unordered_map<std::string, filament::Material *> shadersGPU_;
     std::unordered_map<std::string, filament::View *> viewsGPU_;
     std::unordered_map<std::string, filament::Camera *> camerasGPU_;
-    std::unordered_map<std::string, utils::Entity> entitiesGPU_;
-    std::unordered_map<std::string, filament::Skybox *> skyboxesGPU_;
     std::unordered_map<std::string, filament::IndirectLight *> imageBasedLightsGPU_;
+    std::unordered_map<std::string, filament::Skybox *> skyboxesGPU_;
+    std::unordered_map<std::string, utils::Entity> entitiesGPU_;
     std::unordered_map<std::string, filament::Scene *> scenesGPU_;
 
     std::vector<Vertex> verticesCPU_;

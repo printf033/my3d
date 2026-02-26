@@ -64,7 +64,16 @@ public:
         swapChain_ = engine.getEngine()->createSwapChain(nativeWindow);
         auto view = engine.getView("myView");
         view->setViewport({0, 0, 1280, 720});
-        view->setScene(engine.getScene("myScene"));
+        auto scene = engine.getScene("myScene");
+        auto light = engine.getEntity("myLight");
+        filament::LightManager::Builder(filament::LightManager::Type::DIRECTIONAL)
+            .color(filament::Color::toLinear<filament::ACCURATE>(filament::sRGBColor(0.98f, 0.92f, 0.89f)))
+            .intensity(80000.0f)
+            .direction({0.0f, -1.0f, -1.0f})
+            .castShadows(true) //
+            .build(*engine.getEngine(), light);
+        scene->addEntity(light);
+        view->setScene(scene);
         auto camera = engine.getCamera("myCamera");
         view->setCamera(camera);
         camera->lookAt(cameraCPU_.position, cameraCPU_.position + cameraCPU_.front);
