@@ -1,0 +1,8 @@
+[submodule "libs/mylog"]
+	path = libs/mylog
+	url = git@github.com:printf033/mylog.git
+[submodule "libs/filament"]
+	path = libs/filament
+	url = https://github.com/google/filament.git
+	branch = main
+	shallow = true
